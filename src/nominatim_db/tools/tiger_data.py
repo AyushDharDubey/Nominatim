@@ -23,7 +23,6 @@ from ..errors import UsageError
 from ..db.query_pool import QueryPool
 from ..data.place_info import PlaceInfo
 from ..tokenizer.base import AbstractTokenizer
-from . import freeze
 
 LOG = logging.getLogger()
 
@@ -89,10 +88,6 @@ async def add_tiger_data(data_dir: str, config: Configuration, threads: int,
     """ Import tiger data from directory or tar file `data dir`.
     """
     dsn = config.get_libpq_dsn()
-
-    with connect(dsn) as conn:
-        if freeze.is_frozen(conn):
-            raise UsageError("Tiger cannot be imported when database frozen (Github issue #3048)")
 
     with TigerInput(data_dir) as tar:
         if not tar:
