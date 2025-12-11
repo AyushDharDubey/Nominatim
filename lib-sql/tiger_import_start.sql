@@ -71,18 +71,29 @@ BEGIN
   place_centroid := ST_Centroid(linegeo);
   out_partition := get_partition('us');
 
-  out_parent_place_id := getNearestNamedRoadPlaceId(out_partition, place_centroid,
-                                                    token_info);
+  -- HYBRID LOOKUP LOGIC (see gh-issue #2463)
+  BEGIN
+    out_parent_place_id := getNearestNamedRoadPlaceId(
+      out_partition, place_centroid, token_info
+    );
 
-  IF out_parent_place_id IS NULL THEN
-    SELECT getNearestParallelRoadFeature(out_partition, linegeo)
-      INTO out_parent_place_id;
-  END IF;
+    IF out_parent_place_id IS NULL THEN
+      SELECT getNearestParallelRoadFeature(out_partition, linegeo)
+        INTO out_parent_place_id;
+    END IF;
 
-  IF out_parent_place_id IS NULL THEN
-    SELECT getNearestRoadPlaceId(out_partition, place_centroid)
-      INTO out_parent_place_id;
-  END IF;
+    IF out_parent_place_id IS NULL THEN
+      SELECT getNearestRoadPlaceId(out_partition, place_centroid)
+        INTO out_parent_place_id;
+    END IF;
+
+  -- When updatable information has been dropped:
+  -- Tables like 'location_road_%' do not exist anymore.
+  EXCEPTION WHEN undefined_table THEN   
+        -- Fallback: Look up in 'search_name' (guaranteed to persist) 
+        -- though spatial lookups here can be slower.
+        out_parent_place_id := lookup_road_in_search_name(place_centroid, token_info);
+  END;
 
 --insert street(line) into import table
 insert into location_property_tiger_import (linegeo, place_id, partition,
