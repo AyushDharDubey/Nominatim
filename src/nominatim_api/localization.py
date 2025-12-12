@@ -108,7 +108,7 @@ class Locales:
         """
         for line in lines:
             if line.isaddress and line.names:
-                line.local_name = self.display_name(line.names)
+                line.locale_name = self.display_name(line.names)
 
     def localize_results(self, results: List[BaseResultT]) -> None:
         """ Set the local name of results according to the chosen
