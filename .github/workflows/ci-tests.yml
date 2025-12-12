@@ -37,22 +37,28 @@ jobs:
         needs: create-archive
         strategy:
             matrix:
-                flavour: ["ubuntu-22", "ubuntu-24"]
+                flavour: ["ubuntu-22", "ubuntu-24", "windows"]
                 include:
                     - flavour: ubuntu-22
-                      ubuntu: 22
+                      os: ubuntu-22.04
                       postgresql: 12
                       lua: '5.1'
                       dependencies: pip
                       python: '3.9'
                     - flavour: ubuntu-24
-                      ubuntu: 24
+                      os: ubuntu-24.04
                       postgresql: 18
                       lua: '5.3'
                       dependencies: apt
                       python: 'builtin'
+                    - flavour: windows
+                      os: windows-latest
+                      postgresql: 18
+                      lua: '5.3'
+                      dependencies: pip
+                      python: '3.9'
 
-        runs-on: ubuntu-${{ matrix.ubuntu }}.04
+        runs-on: ${{ matrix.os }}
 
         steps:
             - uses: actions/download-artifact@v4
@@ -62,26 +68,50 @@ jobs:
             - name: Unpack Nominatim
               run: tar xf nominatim-src.tar.bz2
 
-            - uses: ./Nominatim/.github/actions/setup-postgresql
-              with:
-                  postgresql-version: ${{ matrix.postgresql }}
-
-            - uses: ./Nominatim/.github/actions/build-nominatim
-              with:
-                  dependencies: ${{ matrix.dependencies }}
-
-            - uses: actions/cache@v4
-              with:
-                  path: |
-                     /usr/local/bin/osm2pgsql
-                  key: osm2pgsql-bin-22-1
-              if: matrix.ubuntu == '22'
-
             - name: Set up Python
               uses: actions/setup-python@v5
               with:
                   python-version: ${{ matrix.python }}
               if: matrix.python != 'builtin'
+
+            - name: Create Python venv
+              run: |
+                  python -m venv venv
+                  if [ "$RUNNER_OS" == "Windows" ]; then
+                      echo "$PWD/venv/Scripts" >> $GITHUB_PATH
+                  else
+                      echo "$PWD/venv/bin" >> $GITHUB_PATH
+                  fi
+              shell: bash
+              if: matrix.dependencies == 'pip'
+
+            # Linux-specific PostgreSQL setup
+            - uses: ./Nominatim/.github/actions/setup-postgresql
+              with:
+                  postgresql-version: ${{ matrix.postgresql }}
+              if: runner.os == 'Linux'
+
+            # Windows-specific PostgreSQL setup
+            - name: Install PostgreSQL (Windows)
+              run: |
+                  choco install postgresql --version=15.4 --params '/Password:root' --no-progress
+                  echo "PGPASSWORD=root" >> $env:GITHUB_ENV
+                  echo "C:\Program Files\PostgreSQL\15\bin" >> $env:GITHUB_PATH
+              if: runner.os == 'Windows'
+
+            - name: Setup Database Users (Windows)
+              run: |
+                  psql -U postgres -c "CREATE USER runner SUPERUSER PASSWORD 'runner'"
+                  psql -U postgres -c "CREATE USER nominatim SUPERUSER PASSWORD 'nominatim'"
+              if: runner.os == 'Windows'
+
+            # Ubuntu 22 specific osm2pgsql compilation
+            - uses: actions/cache@v4
+              with:
+                  path: |
+                     /usr/local/bin/osm2pgsql
+                  key: osm2pgsql-bin-22-1
+              if: matrix.flavour == 'ubuntu-22'
 
             - name: Compile osm2pgsql
               run: |
@@ -100,44 +130,61 @@ jobs:
                   else
                       sudo apt-get install -y -qq libexpat1 liblua${LUA_VERSION}
                   fi
-              if: matrix.ubuntu == '22'
+              if: matrix.flavour == 'ubuntu-22'
               env:
                   LUA_VERSION: ${{ matrix.lua }}
+
+            # Windows osm2pgsql installation
+            - name: Install osm2pgsql (Windows)
+              run: |
+                   curl -L -o osm2pgsql.zip https://github.com/osm2pgsql-dev/osm2pgsql/releases/download/1.11.0/osm2pgsql-1.11.0-x64.zip
+                   7z x osm2pgsql.zip -oosm2pgsql
+                   echo "$PWD/osm2pgsql/osm2pgsql-bin" >> $GITHUB_PATH
+              shell: bash
+              if: runner.os == 'Windows'
 
             - name: Install test prerequisites (apt)
               run: sudo apt-get install -y -qq python3-pytest python3-pytest-asyncio uvicorn python3-falcon python3-aiosqlite python3-pyosmium
               if: matrix.dependencies == 'apt'
 
             - name: Install test prerequisites (pip)
-              run: ./venv/bin/pip install pytest-asyncio falcon starlette asgi_lifespan aiosqlite osmium uvicorn
+              run: pip install pytest-asyncio falcon starlette asgi_lifespan aiosqlite osmium uvicorn
               if: matrix.dependencies == 'pip'
 
             - name: Install test prerequisites
-              run: ./venv/bin/pip install pytest-bdd
+              run: |
+                  if [ "$DEPENDENCIES" == "apt" ]; then
+                       # apt packages should cover this or use system pip if needed
+                       echo "Skipping pytest-bdd pip install for apt flavour"
+                  else
+                       pip install pytest-bdd
+                  fi
+              env:
+                   DEPENDENCIES: ${{ matrix.dependencies }}
 
             - name: Install latest flake8
-              run: ./venv/bin/pip install -U flake8
+              run: pip install -U flake8
 
             - name: Python linting
-              run: ../venv/bin/python -m flake8 src test/python test/bdd
+              run: python -m flake8 src test/python test/bdd
               working-directory: Nominatim
 
             - name: Install mypy and typechecking info
-              run: ./venv/bin/pip install -U mypy types-PyYAML types-jinja2 types-psutil types-requests types-ujson types-Pygments typing-extensions
+              run: pip install -U mypy types-PyYAML types-jinja2 types-psutil types-requests types-ujson types-Pygments typing-extensions
               if: matrix.dependencies == 'pip'
 
             - name: Python static typechecking
-              run: ../venv/bin/python -m mypy --strict --python-version 3.9 src
+              run: python -m mypy --strict --python-version 3.9 src
               working-directory: Nominatim
               if: matrix.dependencies == 'pip'
 
             - name: Python unit tests
-              run: ../venv/bin/python -m pytest test/python
+              run: python -m pytest test/python
               working-directory: Nominatim
 
             - name: BDD tests
               run: |
-                  ../venv/bin/python -m pytest test/bdd --nominatim-purge
+                  python -m pytest test/bdd --nominatim-purge
               working-directory: Nominatim
 
     install:
