@@ -127,7 +127,7 @@ class AddressLine:
         (boundary, administrative).
     """
 
-    local_name: Optional[str] = None
+    locale_name: Optional[str] = None
     """ Place holder for localization of this address part. See
         [Localization](Result-Handling.md#localization) below.
     """
@@ -136,8 +136,8 @@ class AddressLine:
     def display_name(self) -> Optional[str]:
         """ Dynamically compute the display name for the Address Line component
         """
-        if self.local_name:
-            return self.local_name
+        if self.locale_name:
+            return self.locale_name
         elif 'name' in self.names:
             return self.names['name']
         elif self.names:
