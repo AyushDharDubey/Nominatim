@@ -91,6 +91,9 @@ jobs:
                   postgresql-version: ${{ matrix.postgresql }}
               if: runner.os == 'Linux'
 
+            - uses: ./Nominatim/.github/actions/build-nominatim
+              if: runner.os == 'Linux'
+
             # Windows-specific PostgreSQL setup
             - name: Install PostgreSQL (Windows)
               run: |
