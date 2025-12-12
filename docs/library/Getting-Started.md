@@ -269,12 +269,12 @@ name out of it:
 ```
 
 The `address_row` field has a helper function to compute the display name for each Address Line
-component based on its `local_name` field. This is then utilized by the overall `result` object,
+component based on its `locale_name` field. This is then utilized by the overall `result` object,
 which has a helper function to apply the function to all its ‘address_row’ members and saves
 the result in the `locale_name` field. 
 
-However, in order to set this `local_name` field in a preferred language, you must use the `Locale`
-object which contains the function `localize_results`, which explicitly sets each `local_name field`.
+However, in order to set this `locale_name` field in a preferred language, you must use the `Locale`
+object which contains the function `localize_results`, which explicitly sets each `locale_name field`.
 
 ``` python
 >>> Locales().localize_results(results)
