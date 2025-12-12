@@ -162,11 +162,11 @@ async def dump_results(conn: napi.SearchConnection,
                 'postcode': result.postcode}
 
         for line in (result.address_rows or []):
-            if line.isaddress and line.local_name:
+            if line.isaddress and line.locale_name:
                 if line.category[1] == 'postcode':
-                    data['postcode'] = line.local_name
+                    data['postcode'] = line.locale_name
                 elif line.rank_address in RANK_TO_OUTPUT_MAP:
-                    data[RANK_TO_OUTPUT_MAP[line.rank_address]] = line.local_name
+                    data[RANK_TO_OUTPUT_MAP[line.rank_address]] = line.locale_name
 
         writer.writerow(data)
 
