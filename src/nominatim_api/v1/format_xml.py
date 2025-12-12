@@ -22,11 +22,11 @@ def _write_xml_address(root: ET.Element, address: AddressLines,
     parts = {}
     for line in address:
         if line.isaddress:
-            if line.local_name:
+            if line.locale_name:
                 label = cl.get_label_tag(line.category, line.extratags,
                                          line.rank_address, country_code)
                 if label not in parts:
-                    parts[label] = line.local_name
+                    parts[label] = line.locale_name
             if line.names and 'ISO3166-2' in line.names and line.admin_level:
                 parts[f"ISO3166-2-lvl{line.admin_level}"] = line.names['ISO3166-2']
 

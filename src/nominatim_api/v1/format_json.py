@@ -26,11 +26,11 @@ def _write_typed_address(out: JsonWriter, address: Optional[AddressLines],
     parts = {}
     for line in (address or []):
         if line.isaddress:
-            if line.local_name:
+            if line.locale_name:
                 label = cl.get_label_tag(line.category, line.extratags,
                                          line.rank_address, country_code)
                 if label not in parts:
-                    parts[label] = line.local_name
+                    parts[label] = line.locale_name
             if line.names and 'ISO3166-2' in line.names and line.admin_level:
                 parts[f"ISO3166-2-lvl{line.admin_level}"] = line.names['ISO3166-2']
 
@@ -47,16 +47,16 @@ def _write_geocodejson_address(out: JsonWriter,
                                country_code: Optional[str]) -> None:
     extra = {}
     for line in (address or []):
-        if line.isaddress and line.local_name:
+        if line.isaddress and line.locale_name:
             if line.category[1] in ('postcode', 'postal_code'):
-                out.keyval('postcode', line.local_name)
+                out.keyval('postcode', line.locale_name)
             elif line.category[1] == 'house_number':
-                out.keyval('housenumber', line.local_name)
+                out.keyval('housenumber', line.locale_name)
             elif ((obj_place_id is None or obj_place_id != line.place_id)
                   and line.rank_address >= 4 and line.rank_address < 28):
                 rank_name = GEOCODEJSON_RANKS[line.rank_address]
                 if rank_name not in extra:
-                    extra[rank_name] = line.local_name
+                    extra[rank_name] = line.locale_name
 
     for k, v in extra.items():
         out.keyval(k, v)
@@ -275,9 +275,9 @@ def format_base_geocodejson(results: Union[ReverseResults, SearchResults],
             out.key('admin').start_object()
             if result.address_rows:
                 for line in result.address_rows:
-                    if line.isaddress and (line.admin_level or 15) < 15 and line.local_name \
+                    if line.isaddress and (line.admin_level or 15) < 15 and line.locale_name \
                        and line.category[0] == 'boundary' and line.category[1] == 'administrative':
-                        out.keyval(f"level{line.admin_level}", line.local_name)
+                        out.keyval(f"level{line.admin_level}", line.locale_name)
             out.end_object().next()
 
         if options.get('entrances', False):
