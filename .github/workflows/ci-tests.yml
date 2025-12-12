@@ -94,9 +94,9 @@ jobs:
             # Windows-specific PostgreSQL setup
             - name: Install PostgreSQL (Windows)
               run: |
-                  choco install postgresql --version=15.4 --params '/Password:root' --no-progress
+                  choco install postgresql --version=18 --params '/Password:root' --no-progress
                   echo "PGPASSWORD=root" >> $env:GITHUB_ENV
-                  echo "C:\Program Files\PostgreSQL\15\bin" >> $env:GITHUB_PATH
+                  echo "C:\Program Files\PostgreSQL\18\bin" >> $env:GITHUB_PATH
               if: runner.os == 'Windows'
 
             - name: Setup Database Users (Windows)
