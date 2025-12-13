@@ -23,5 +23,3 @@
 {% endif %}
 
 {% include('functions/partition-functions.sql') %}
-
-{% include('functions/tiger_lookup.sql') %}
