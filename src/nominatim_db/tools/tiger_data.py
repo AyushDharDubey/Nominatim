@@ -95,6 +95,12 @@ async def add_tiger_data(data_dir: str, config: Configuration, threads: int,
 
         with connect(dsn) as conn:
             sql = SQLPreprocessor(conn, config)
+
+            if sql.env.globals['db']['reverse_only']:
+                raise UsageError(
+                    "Tiger cannot be imported when database is setup in 'reverse_only' mode"
+                )
+
             sql.run_sql_file(conn, 'tiger_import_start.sql')
 
         # Reading files and then for each file line handling
