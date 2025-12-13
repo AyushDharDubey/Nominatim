@@ -60,7 +60,7 @@ END;
 $$
 LANGUAGE plpgsql;
 
-
+-- Tiger import function
 CREATE OR REPLACE FUNCTION tiger_line_import(linegeo GEOMETRY, in_startnumber INTEGER,
                                              in_endnumber INTEGER, interpolationtype TEXT,
                                              token_info JSONB, in_postcode TEXT) RETURNS INTEGER
@@ -118,7 +118,8 @@ BEGIN
   out_partition := get_partition('us');
 
   -- HYBRID LOOKUP LOGIC (see gh-issue #2463)
-  BEGIN
+  -- if partition tables exist, use them for fast spatial lookups
+  {% if 'location_road_0' in db.tables %}
     out_parent_place_id := getNearestNamedRoadPlaceId(
       out_partition, place_centroid, token_info
     );
@@ -134,12 +135,16 @@ BEGIN
     END IF;
 
   -- When updatable information has been dropped:
-  -- Tables like 'location_road_%' do not exist anymore.
-  EXCEPTION WHEN undefined_table THEN   
-        -- Fallback: Look up in 'search_name' (guaranteed to persist) 
-        -- though spatial lookups here can be slower.
-        out_parent_place_id := lookup_road_in_search_name(place_centroid, token_info);
-  END;
+  -- Partition tables no longer exist, but search_name still persists.
+  {% elif 'search_name' in db.tables %}
+    RAISE WARNING 'Database frozen. Performing fallback tiger import lookup without partition tables';
+    -- Fallback: Look up in 'search_name' table 
+    -- though spatial lookups here can be slower.
+    out_parent_place_id := lookup_road_in_search_name(place_centroid, token_info);
+  {% else %}
+    RAISE EXCEPTION 'Cannot perform tiger import: required tables are missing';
+    RETURN 0;
+  {% endif %}
 
 --insert street(line) into import table
 insert into location_property_tiger_import (linegeo, place_id, partition,
