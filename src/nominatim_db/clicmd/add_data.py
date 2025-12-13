@@ -15,6 +15,8 @@ import asyncio
 import psutil
 
 from .args import NominatimArgs
+from ..db.connection import connect
+from ..tools.freeze import is_frozen
 
 
 LOG = logging.getLogger()
@@ -65,6 +67,11 @@ class UpdateAddData:
 
         if args.tiger_data:
             return asyncio.run(self._add_tiger_data(args))
+
+        with connect(args.config.get_libpq_dsn()) as conn:
+            if is_frozen(conn):
+                print('Database is marked frozen. New data can\'t be added.')
+                return 1
 
         osm2pgsql_params = args.osm2pgsql_options(default_cache=1000, default_threads=1)
         if args.file or args.diff:
