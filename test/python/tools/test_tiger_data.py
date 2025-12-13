@@ -108,8 +108,12 @@ async def test_add_tiger_data_reverse_only(def_config, src_dir, temp_db_conn, ti
         cur.execute("DROP TABLE search_name")
     temp_db_conn.commit()
 
-    with pytest.raises(UsageError, match="Tiger cannot be imported when database is setup in 'reverse_only' mode"):
-        await tiger_data.add_tiger_data(str(src_dir / 'test' / 'testdb' / 'tiger'), def_config, 1, tokenizer_mock())
+    with pytest.raises(
+        UsageError,
+        match="Tiger cannot be imported when database is setup in 'reverse_only' mode"
+    ):
+        await tiger_data.add_tiger_data(str(src_dir / 'test' / 'testdb' / 'tiger'),
+                                        def_config, 1, tokenizer_mock())
 
     assert tiger_table.count() == 0
 
