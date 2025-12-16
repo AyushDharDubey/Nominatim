@@ -141,9 +141,6 @@ BEGIN
     -- Fallback: Look up in 'search_name' table 
     -- though spatial lookups here can be slower.
     out_parent_place_id := lookup_road_in_search_name(place_centroid, token_info);
-  {% else %}
-    RAISE EXCEPTION 'Cannot perform tiger import: required tables are missing';
-    RETURN 0;
   {% endif %}
 
 --insert street(line) into import table
