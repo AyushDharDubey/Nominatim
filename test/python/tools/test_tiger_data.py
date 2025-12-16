@@ -110,7 +110,8 @@ async def test_add_tiger_data_reverse_only(def_config, src_dir, temp_db_conn, ti
 
     with pytest.raises(
         UsageError,
-        match="Tiger cannot be imported when database is setup in 'reverse_only' mode"
+        match="Cannot perform tiger import: required tables are missing. " \
+            "See https://github.com/osm-search/Nominatim/issues/2463 for details."
     ):
         await tiger_data.add_tiger_data(str(src_dir / 'test' / 'testdb' / 'tiger'),
                                         def_config, 1, tokenizer_mock())
