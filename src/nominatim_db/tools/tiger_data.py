@@ -17,7 +17,7 @@ import tarfile
 from psycopg.types.json import Json
 
 from ..config import Configuration
-from ..db.connection import connect
+from ..db.connection import connect, table_exists
 from ..db.sql_preprocessor import SQLPreprocessor
 from ..errors import UsageError
 from ..db.query_pool import QueryPool
@@ -96,9 +96,10 @@ async def add_tiger_data(data_dir: str, config: Configuration, threads: int,
         with connect(dsn) as conn:
             sql = SQLPreprocessor(conn, config)
 
-            if sql.env.globals['db']['reverse_only']:
+            if not table_exists(conn, 'search_name'):
                 raise UsageError(
-                    "Tiger cannot be imported when database is setup in 'reverse_only' mode"
+                    "Cannot perform tiger import: required tables are missing. "
+                    "See https://github.com/osm-search/Nominatim/issues/2463 for details."
                 )
 
             sql.run_sql_file(conn, 'tiger_import_start.sql')
