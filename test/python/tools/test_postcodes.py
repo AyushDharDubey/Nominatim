@@ -220,6 +220,20 @@ class TestPostcodes:
         assert self.row_set == {(None, 'xx', 'AB 4511', 10, 12),
                                 (None, 'xx', 'CD 4511', -10, -5)}
 
+    def test_postcodes_extern_csv_no_centroid(self, postcode_update, tmp_path,
+                                              insert_implicit_postcode):
+        insert_implicit_postcode(1, 'xx', 'POINT(10 12)', 'AB 4511')
+
+        extfile = tmp_path / 'xx_postcodes.csv'
+        # should be skipped with logged warning, but not cause an error
+        extfile.write_text("postcode,lat,lon\nCD 4511,,\n"
+                           "822114, 10, 20\n", encoding='utf-8')
+
+        postcode_update(tmp_path)
+
+        assert self.row_set == {(None, 'xx', 'AB 4511', 10, 12),
+                                (None, 'xx', '822114', 20, 10)}
+
     @pytest.mark.parametrize("gzipped", [True, False])
     def test_postcodes_extern_jsonl(self, postcode_update, tmp_path,
                                     insert_implicit_postcode, gzipped):
@@ -296,6 +310,17 @@ class TestPostcodes:
         assert self.row_set == {(None, 'xx', '822114', 10, 12),
                                 (None, 'xx', 'GOOD', 10, 10),
                                 (None, 'xx', 'ALSO_GOOD', 20, 20)}
+
+    def test_postcodes_extern_jsonl_no_centroid_and_no_geometry(self, postcode_update, tmp_path,
+                                                                insert_implicit_postcode):
+        insert_implicit_postcode(1, 'xx', 'POINT(10 12)', '822114')
+        extfile = tmp_path / 'xx_postcodes.jsonl'
+        extfile.write_text('{"properties": '   # should be skipped with logged warning
+                           '{"postcode": "GOOD"}}\n', encoding='utf-8')
+
+        postcode_update(tmp_path)
+
+        assert self.row_set == {(None, 'xx', '822114', 10, 12)}
 
     def test_postcodes_extern_bad_column(self, postcode_update, tmp_path,
                                          insert_implicit_postcode):
