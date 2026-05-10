@@ -10,6 +10,7 @@ Tests for functions to maintain the artificial postcode table.
 import subprocess
 
 import pytest
+import json
 
 from psycopg.rows import tuple_row
 
@@ -99,6 +100,12 @@ class TestPostcodes:
                                   ST_X(centroid), ST_Y(centroid)
                            FROM location_postcodes""")
             return {r for r in cur}
+
+    def get_geometry(self, postcode):
+        with self.conn.cursor(row_factory=tuple_row) as cur:
+            cur.execute("""SELECT ST_AsText(geometry) FROM
+                         location_postcodes WHERE postcode = %s""", (postcode,))
+            return cur.fetchone()
 
     def test_postcodes_empty(self, postcode_update):
         postcode_update()
@@ -197,8 +204,8 @@ class TestPostcodes:
                                 (None, 'cc', 'DD23 T', 100, 56)}
 
     @pytest.mark.parametrize("gzipped", [True, False])
-    def test_postcodes_extern(self, postcode_update, tmp_path,
-                              insert_implicit_postcode, gzipped):
+    def test_postcodes_extern_csv(self, postcode_update, tmp_path,
+                                  insert_implicit_postcode, gzipped):
         insert_implicit_postcode(1, 'xx', 'POINT(10 12)', 'AB 4511')
 
         extfile = tmp_path / 'xx_postcodes.csv'
@@ -212,6 +219,83 @@ class TestPostcodes:
 
         assert self.row_set == {(None, 'xx', 'AB 4511', 10, 12),
                                 (None, 'xx', 'CD 4511', -10, -5)}
+
+    @pytest.mark.parametrize("gzipped", [True, False])
+    def test_postcodes_extern_jsonl(self, postcode_update, tmp_path,
+                                    insert_implicit_postcode, gzipped):
+        insert_implicit_postcode(1, 'xx', 'POINT(10 12)', 'AB 4511')
+        extfile = tmp_path / 'xx_postcodes.jsonl'
+
+        extfile.write_text(
+            json.dumps({'properties': {'postcode': 'AB 4511', 'lat': 1, 'lon': 1},
+                        'geometry': {'type': 'Polygon',
+                                     'coordinates': [[[0, 0], [1, 3], [2, 0], [0, 0]]]}}) + '\n' +
+            json.dumps({'properties': {'postcode': '822114', 'lat': 0.5, 'lon': 0.5},
+                        'geometry': {'type': 'Polygon',
+                                     'coordinates': [[[0, 0], [0, 10], [10, 10],
+                                                      [10, 0], [0, 0]]]}}) + '\n',
+            encoding='utf-8'
+        )
+
+        if gzipped:
+            subprocess.run(['gzip', str(extfile)])
+            assert not extfile.is_file()
+
+        postcode_update(tmp_path)
+
+        assert self.row_set == {(None, 'xx', 'AB 4511', 10, 12),
+                                (None, 'xx', '822114', 0.5, 0.5)}
+        assert self.get_geometry('822114')[0] == 'POLYGON((0 0,0 10,10 10,10 0,0 0))'
+
+    def test_postcodes_extern_jsonl_compute_centroid_from_geometry(self, postcode_update, tmp_path,
+                                                                   insert_implicit_postcode):
+        insert_implicit_postcode(1, 'xx', 'POINT(10 12)', 'AB 4511')
+        extfile = tmp_path / 'xx_postcodes.jsonl'
+
+        extfile.write_text(
+            json.dumps({'properties': {'postcode': '822114'},
+                        'geometry': {'type': 'Polygon',
+                                     'coordinates': [[[0, 0], [0, 10], [10, 10],
+                                                      [10, 0], [0, 0]]]}}) + '\n',
+            encoding='utf-8'
+        )
+
+        postcode_update(tmp_path)
+
+        assert self.row_set == {(None, 'xx', 'AB 4511', 10, 12),
+                                (None, 'xx', '822114', 5, 5)}
+        assert self.get_geometry('822114')[0] == 'POLYGON((0 0,0 10,10 10,10 0,0 0))'
+
+    def test_postcodes_jsonl_overrides_csv(self, postcode_update, tmp_path,
+                                           insert_implicit_postcode):
+        insert_implicit_postcode(1, 'xx', 'POINT(10 12)', 'AB 4511')
+
+        # JSONL should be preferred if both exist (based on my loop order)
+        csvfile = tmp_path / 'xx_postcodes.csv'
+        csvfile.write_text("postcode,lat,lon\nPOSTC1,10,10", encoding='utf-8')
+        jsonlfile = tmp_path / 'xx_postcodes.jsonl'
+        jsonlfile.write_text(json.dumps(
+            {'properties': {'postcode': 'POSTC1', 'lat': 20, 'lon': 20}}) + '\n', encoding='utf-8')
+
+        postcode_update(tmp_path)
+
+        assert self.row_set == {(None, 'xx', 'POSTC1', 20, 20),
+                                (None, 'xx', 'AB 4511', 10, 12)}
+
+    def test_postcodes_extern_jsonl_malformed(self, postcode_update, tmp_path,
+                                              insert_implicit_postcode):
+        insert_implicit_postcode(1, 'xx', 'POINT(10 12)', '822114')
+        extfile = tmp_path / 'xx_postcodes.jsonl'
+        extfile.write_text('{"properties": {"postcode": "GOOD", "lat": 10, "lon": 10}}\n'
+                           'BAD JSON\n'
+                           '{"properties": {"postcode": "ALSO_GOOD", "lat": 20, "lon": 20}}\n',
+                           encoding='utf-8')
+
+        postcode_update(tmp_path)
+
+        assert self.row_set == {(None, 'xx', '822114', 10, 12),
+                                (None, 'xx', 'GOOD', 10, 10),
+                                (None, 'xx', 'ALSO_GOOD', 20, 20)}
 
     def test_postcodes_extern_bad_column(self, postcode_update, tmp_path,
                                          insert_implicit_postcode):
