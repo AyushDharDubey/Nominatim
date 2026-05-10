@@ -8,12 +8,13 @@
 Functions for importing, updating and otherwise maintaining the table
 of artificial postcode centroids.
 """
-from typing import Optional, Tuple, Dict, TextIO
+from typing import Optional, Tuple, Dict, TextIO, Any
 from collections import defaultdict
 from pathlib import Path
 import csv
 import gzip
 import logging
+import json
 from math import isfinite
 
 from psycopg import sql as pysql
@@ -26,7 +27,7 @@ from ..tokenizer.base import AbstractAnalyzer, AbstractTokenizer
 LOG = logging.getLogger()
 
 
-def _to_float(numstr: str, max_value: float) -> float:
+def _to_float(numstr: str | float, max_value: float) -> float:
     """ Convert the number in string into a float. The number is expected
         to be in the range of [-max_value, max_value]. Otherwise rises a
         ValueError.
@@ -56,12 +57,16 @@ class _PostcodeCollector:
                  default_extent: int, exclude: set[str] = set()):
         self.country = country
         self.matcher = matcher
-        self.extent = default_extent
+        self.default_extent = default_extent
         self.exclude = exclude
         self.collected: Dict[str, PointsCentroid] = defaultdict(PointsCentroid)
+        self.extents: Dict[str, int] = {}
+        self.geometries: Dict[str, str] = {}
         self.normalization_cache: Optional[Tuple[str, Optional[str]]] = None
 
-    def add(self, postcode: str, x: float, y: float) -> None:
+    def add(self, postcode: str, x: Optional[float], y: Optional[float],
+            extent: Optional[int] = None, geometry: Optional[str] = None,
+            is_external: bool = False) -> None:
         """ Add the given postcode to the collection cache. If the postcode
             already existed, it is overwritten with the new centroid.
         """
@@ -75,7 +80,20 @@ class _PostcodeCollector:
                 self.normalization_cache = (postcode, normalized)
 
             if normalized and normalized not in self.exclude:
-                self.collected[normalized] += (x, y)
+                if is_external:
+                    if normalized not in self.collected:
+                        if x is not None and y is not None:
+                            self.collected[normalized] += (x, y)
+                        else:
+                            # Touch the collector to ensure the postcode is recorded
+                            self.collected[normalized]
+                    if extent is not None:
+                        self.extents[normalized] = extent
+                    if geometry is not None:
+                        self.geometries[normalized] = geometry
+                else:
+                    assert x is not None and y is not None
+                    self.collected[normalized] += (x, y)
 
     def commit(self, conn: Connection, analyzer: AbstractAnalyzer,
                project_dir: Optional[Path], is_initial: bool) -> None:
@@ -96,9 +114,26 @@ class _PostcodeCollector:
                             (self.country, ))
                 to_delete = [row[0] for row in cur if row[0] not in self.collected]
 
-        to_add = [dict(zip(('pc', 'x', 'y'), (k, *v.centroid())))
-                  for k, v in self.collected.items()]
+        to_add = []
+        for k, v in self.collected.items():
+            extent = self.extents.get(k, self.default_extent)
+            try:
+                x, y = v.centroid()
+            except ValueError:
+                x, y = None, None
+
+            geom = self.geometries.get(k)
+            if x is None and geom is None:
+                continue
+
+            to_add.append({'pc': k, 'x': x, 'y': y,
+                           'rank': _extent_to_rank(extent),
+                           'geom': geom,
+                           'extent': extent})
+
         self.collected = defaultdict(PointsCentroid)
+        self.extents = {}
+        self.geometries = {}
 
         LOG.info("Processing country '%s' (%s added, %s deleted).",
                  self.country, len(to_add), len(to_delete))
@@ -111,12 +146,13 @@ class _PostcodeCollector:
                            'centroid',
                            'geometry']
                 values = [pysql.Literal(self.country),
-                          pysql.Literal(_extent_to_rank(self.extent)),
+                          pysql.Placeholder('rank'),
                           pysql.Placeholder('pc'),
-                          pysql.SQL('ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 4326)'),
-                          pysql.SQL("""expand_by_meters(
-                                           ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 4326), {})""")
-                               .format(pysql.Literal(self.extent))]
+                          pysql.SQL("""COALESCE(ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 4326),
+                                                ST_Centroid(ST_GeomFromGeoJSON(%(geom)s)))"""),
+                          pysql.SQL("""COALESCE(ST_GeomFromGeoJSON(%(geom)s),
+                                                expand_by_meters(ST_SetSRID(
+                                                ST_MakePoint(%(x)s, %(y)s), 4326), %(extent)s))""")]
                 if is_initial:
                     columns.extend(('place_id', 'indexed_status'))
                     values.extend((pysql.SQL("nextval('seq_place')"), pysql.Literal(1)))
@@ -135,46 +171,88 @@ class _PostcodeCollector:
     def _update_from_external(self, analyzer: AbstractAnalyzer, project_dir: Path) -> None:
         """ Look for an external postcode file for the active country in
             the project directory and add missing postcodes when found.
+            Prioritises jsonl files over csv and gzipped files over
+            uncompressed ones.
         """
-        csvfile = self._open_external(project_dir)
-        if csvfile is None:
-            return
+        for ext in ('.jsonl', '.jsonl.gz', '.csv', '.csv.gz'):
+            fname = project_dir / f'{self.country}_postcodes{ext}'
+            if fname.is_file():
+                LOG.info("Using external postcode file '%s'.", fname)
+                fh: Any
+                if ext.endswith('.gz'):
+                    fh = gzip.open(fname, 'rt', encoding='utf-8')
+                else:
+                    fh = open(fname, 'r', encoding='utf-8')
 
-        try:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                if 'postcode' not in row or 'lat' not in row or 'lon' not in row:
-                    LOG.warning("Bad format for external postcode file for country '%s'."
-                                " Ignored.", self.country)
-                    return
-                postcode = analyzer.normalize_postcode(row['postcode'])
-                if postcode not in self.collected:
-                    try:
-                        # Do float conversation separately, it might throw
-                        centroid = (_to_float(row['lon'], 180),
-                                    _to_float(row['lat'], 90))
-                        self.collected[postcode] += centroid
-                    except ValueError:
-                        LOG.warning("Bad coordinates %s, %s in '%s' country postcode file.",
-                                    row['lat'], row['lon'], self.country)
+                try:
+                    if '.jsonl' in ext:
+                        self._read_external_jsonl(analyzer, fh)
+                    else:
+                        self._read_external_csv(analyzer, fh)
+                finally:
+                    fh.close()
+                return
 
-        finally:
-            csvfile.close()
+    def _read_external_csv(self, analyzer: AbstractAnalyzer, fh: TextIO) -> None:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            if 'postcode' not in row or 'lat' not in row or 'lon' not in row:
+                LOG.warning("Bad format for external postcode file for country '%s'."
+                            " Ignored.", self.country)
+                return
+            postcode = analyzer.normalize_postcode(row['postcode'])
+            if postcode not in self.collected:
+                try:
+                    # Do float conversation separately, it might throw
+                    x = _to_float(row['lon'], 180)
+                    y = _to_float(row['lat'], 90)
+                    self.add(postcode, x, y, is_external=True)
+                except ValueError:
+                    LOG.warning("Bad coordinates %s, %s in '%s' country postcode file.",
+                                row['lat'], row['lon'], self.country)
 
-    def _open_external(self, project_dir: Path) -> Optional[TextIO]:
-        fname = project_dir / f'{self.country}_postcodes.csv'
+    def _read_external_jsonl(self, analyzer: AbstractAnalyzer, fh: TextIO) -> None:
+        for i, line in enumerate(fh, start=1):
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                LOG.warning("Not a valid JSON line in line no %s. Ignored.", i)
+                continue
 
-        if fname.is_file():
-            LOG.info("Using external postcode file '%s'.", fname)
-            return open(fname, 'r', encoding='utf-8')
+            props = data.get('properties', {})
+            postcode = postcode = analyzer.normalize_postcode(props.get('postcode'))
+            extent = props.get('extent')
+            geometry = data.get('geometry')
 
-        fname = project_dir / f'{self.country}_postcodes.csv.gz'
+            if not postcode:
+                LOG.warning("Missing postcode in line %s for country '%s'. Ignored.",
+                            i, self.country)
+                continue
 
-        if fname.is_file():
-            LOG.info("Using external postcode file '%s'.", fname)
-            return gzip.open(fname, 'rt', encoding='utf-8')
+            lon = props.get('lon')
+            lat = props.get('lat')
+            if lon is not None and lat is not None:
+                try:
+                    lon = _to_float(lon, 180)
+                    lat = _to_float(lat, 90)
+                except ValueError:
+                    LOG.warning("Bad centroid coordinates %s, %s in '%s' country postcode file.",
+                                lat, lon, self.country)
+            elif geometry is None:
+                LOG.warning("No centroid or geometry found for postcode '%s' in line %s of country"
+                            " '%s' postcode file. Ignored.", postcode, i, self.country)
+                continue
 
-        return None
+            geom_json = json.dumps(geometry) if geometry else None
+
+            if postcode not in self.collected:
+                try:
+                    self.add(postcode, lon, lat,
+                             extent=int(extent) if extent is not None else None,
+                             geometry=geom_json, is_external=True)
+                except (ValueError, TypeError):
+                    LOG.warning("Bad GeoJSON object in line %s of country '%s' postcode file.",
+                                i, self.country)
 
 
 def update_postcodes(dsn: str, project_dir: Optional[Path],
