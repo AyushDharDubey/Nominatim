@@ -14,6 +14,7 @@ from pathlib import Path
 import csv
 import gzip
 import logging
+import json
 from math import isfinite
 
 from psycopg import sql as pysql
@@ -59,9 +60,12 @@ class _PostcodeCollector:
         self.extent = default_extent
         self.exclude = exclude
         self.collected: Dict[str, PointsCentroid] = defaultdict(PointsCentroid)
+        self.geometries: Dict[str, str] = {}
+        self.is_authoritative: bool = False
         self.normalization_cache: Optional[Tuple[str, Optional[str]]] = None
 
-    def add(self, postcode: str, x: float, y: float) -> None:
+    def add(self, postcode: str, x: Optional[float], y: Optional[float],
+            extent: Optional[int] = None, geometry: Optional[str] = None) -> None:
         """ Add the given postcode to the collection cache. If the postcode
             already existed, it is overwritten with the new centroid.
         """
@@ -75,7 +79,14 @@ class _PostcodeCollector:
                 self.normalization_cache = (postcode, normalized)
 
             if normalized and normalized not in self.exclude:
-                self.collected[normalized] += (x, y)
+                if x is not None and y is not None:
+                    self.collected[normalized] += (x, y)
+                else:
+                    # Touch the collector to ensure the postcode is recorded
+                    self.collected[normalized]
+
+                if geometry is not None:
+                    self.geometries[normalized] = geometry
 
     def commit(self, conn: Connection, analyzer: AbstractAnalyzer,
                project_dir: Optional[Path], is_initial: bool) -> None:
@@ -96,9 +107,21 @@ class _PostcodeCollector:
                             (self.country, ))
                 to_delete = [row[0] for row in cur if row[0] not in self.collected]
 
-        to_add = [dict(zip(('pc', 'x', 'y'), (k, *v.centroid())))
-                  for k, v in self.collected.items()]
+        to_add = []
+        for k, v in self.collected.items():
+            try:
+                x, y = v.centroid()
+            except ValueError:
+                x, y = None, None
+
+            geom = self.geometries.get(k)
+            if x is None and geom is None:
+                continue
+
+            to_add.append({'pc': k, 'x': x, 'y': y, 'geom': geom})
+
         self.collected = defaultdict(PointsCentroid)
+        self.geometries = {}
 
         LOG.info("Processing country '%s' (%s added, %s deleted).",
                  self.country, len(to_add), len(to_delete))
@@ -108,14 +131,18 @@ class _PostcodeCollector:
                 columns = ['country_code',
                            'rank_search',
                            'postcode',
+                           'is_authoritative',
                            'centroid',
                            'geometry']
                 values = [pysql.Literal(self.country),
                           pysql.Literal(_extent_to_rank(self.extent)),
                           pysql.Placeholder('pc'),
-                          pysql.SQL('ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 4326)'),
-                          pysql.SQL("""expand_by_meters(
-                                           ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 4326), {})""")
+                          pysql.Literal(self.is_authoritative),
+                          pysql.SQL("""COALESCE(ST_SetSRID(ST_MakePoint(%(x)s, %(y)s), 4326),
+                                                ST_Centroid(ST_GeomFromGeoJSON(%(geom)s)))"""),
+                          pysql.SQL("""COALESCE(ST_GeomFromGeoJSON(%(geom)s),
+                                                expand_by_meters(ST_SetSRID(
+                                                    ST_MakePoint(%(x)s, %(y)s), 4326), {}))""")
                                .format(pysql.Literal(self.extent))]
                 if is_initial:
                     columns.extend(('place_id', 'indexed_status'))
@@ -136,11 +163,50 @@ class _PostcodeCollector:
         """ Look for an external postcode file for the active country in
             the project directory and add missing postcodes when found.
         """
-        csvfile = self._open_external(project_dir)
-        if csvfile is None:
-            return
+        jsonlfile = self._open_external_file('jsonl', project_dir)
+        if jsonlfile is not None:
+            self.is_authoritative = True
+            for i, line in enumerate(jsonlfile, start=1):
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    LOG.warning("Ignored line no %s: Invalid JSON in external postcode file for"
+                                "country '%s'.", i, self.country)
+                    continue
 
-        try:
+                geometry = data.get('geometry')
+                if (not isinstance(geometry, dict)
+                        or geometry.get('type') not in ('Polygon', 'MultiPolygon')):
+                    LOG.warning("Ignored line no %s: Invalid geometry in external postcode file for"
+                                "country '%s'.", i, self.country)
+                    continue
+
+                props = data.get('properties', {})
+                raw_postcode = props.get('postcode')
+                if not raw_postcode:
+                    LOG.warning("Ignored line no %s: Missing postcode in external postcode file for"
+                                "country '%s'.", i, self.country)
+                    continue
+
+                lon = props.get('lon')
+                lat = props.get('lat')
+                if lon is not None and lat is not None:
+                    try:
+                        lon = _to_float(lon, 180)
+                        lat = _to_float(lat, 90)
+                    except ValueError:
+                        LOG.warning("Bad centroid %s, %s in line no %s for country '%s'. Defaulting"
+                                    " to geometry centroid.", lat, lon, i, self.country)
+                        lon, lat = None, None
+                else:
+                    lon, lat = None, None
+
+                self.add(raw_postcode, lon, lat,
+                         geometry=json.dumps(geometry))
+            jsonlfile.close()
+
+        csvfile = self._open_external_file('csv', project_dir)
+        if csvfile is not None:
             reader = csv.DictReader(csvfile)
             for row in reader:
                 if 'postcode' not in row or 'lat' not in row or 'lon' not in row:
@@ -148,31 +214,30 @@ class _PostcodeCollector:
                                 " Ignored.", self.country)
                     return
                 postcode = analyzer.normalize_postcode(row['postcode'])
-                if postcode not in self.collected:
-                    try:
-                        # Do float conversation separately, it might throw
-                        centroid = (_to_float(row['lon'], 180),
-                                    _to_float(row['lat'], 90))
-                        self.collected[postcode] += centroid
-                    except ValueError:
-                        LOG.warning("Bad coordinates %s, %s in '%s' country postcode file.",
-                                    row['lat'], row['lon'], self.country)
+                try:
+                    # Do float conversation separately, it might throw
+                    x = _to_float(row['lon'], 180)
+                    y = _to_float(row['lat'], 90)
+                except ValueError:
+                    LOG.warning("Bad coordinates %s, %s in '%s' country postcode file.",
+                                row['lat'], row['lon'], self.country)
+                    continue
 
-        finally:
+                if postcode not in self.collected:
+                    self.add(postcode, x, y)
+
             csvfile.close()
 
-    def _open_external(self, project_dir: Path) -> Optional[TextIO]:
-        fname = project_dir / f'{self.country}_postcodes.csv'
+    def _open_external_file(self, ftype: str, project_dir: Path) -> Optional[TextIO]:
+        for ext in (ftype, ftype + '.gz'):
+            fname = project_dir / f'{self.country}_postcodes.{ext}'
 
-        if fname.is_file():
-            LOG.info("Using external postcode file '%s'.", fname)
-            return open(fname, 'r', encoding='utf-8')
-
-        fname = project_dir / f'{self.country}_postcodes.csv.gz'
-
-        if fname.is_file():
-            LOG.info("Using external postcode file '%s'.", fname)
-            return gzip.open(fname, 'rt', encoding='utf-8')
+            if fname.is_file():
+                LOG.info("Using external postcode file '%s'.", fname)
+                if ext.endswith('.gz'):
+                    return gzip.open(fname, 'rt', encoding='utf-8')
+                else:
+                    return open(fname, 'r', encoding='utf-8')
 
         return None
 
@@ -200,6 +265,11 @@ def update_postcodes(dsn: str, project_dir: Optional[Path],
                                 DISABLE TRIGGER location_postcodes_before_insert""")
             # Now update first postcode areas
             _update_postcode_areas(conn, analyzer, matcher, is_initial)
+
+            # Update postcode areas from external files, this will add new ones without overriding
+            # any existing areas imported from OSM.
+            _update_external_postcode_areas(conn, analyzer, matcher, project_dir)
+
             # Then fill with estimated postcode centroids from other info
             _update_guessed_postcode(conn, analyzer, matcher, project_dir, is_initial)
             if is_initial:
@@ -291,6 +361,39 @@ def _update_postcode_areas(conn: Connection, analyzer: AbstractAnalyzer,
                                    is_initial)
 
 
+def _update_external_postcode_areas(conn: Connection, analyzer: AbstractAnalyzer,
+                                    matcher: PostcodeFormatter,
+                                    project_dir: Optional[Path]) -> None:
+    """ Look for external postcode JSONL files and import Polygons as authoritative
+        areas.
+    """
+
+    if project_dir is None:
+        return
+
+    todo_countries: set[str] = set()
+
+    with conn.cursor() as cur:
+        cur.execute("""SELECT DISTINCT country_code FROM placex
+                    WHERE country_code is not null""")
+        todo_countries = {row[0] for row in cur}
+
+    area_pcs = defaultdict(set)
+    with conn.cursor() as cur:
+        cur.execute("""SELECT country_code, postcode
+                       FROM location_postcodes
+                       WHERE osm_id is not null
+                       ORDER BY country_code""")
+        for cc, pc in cur:
+            area_pcs[cc].add(pc)
+
+    for country in todo_countries:
+        fmt = matcher.get_matcher(country)
+        ext = matcher.get_postcode_extent(country)
+        _PostcodeCollector(country, fmt, ext,
+                           exclude=area_pcs[country]).commit(conn, analyzer, project_dir, False)
+
+
 def _update_guessed_postcode(conn: Connection, analyzer: AbstractAnalyzer,
                              matcher: PostcodeFormatter, project_dir: Optional[Path],
                              is_initial: bool) -> None:
@@ -308,14 +411,16 @@ def _update_guessed_postcode(conn: Connection, analyzer: AbstractAnalyzer,
                             WHERE osm_id is null""")
             todo_countries = {row[0] for row in cur}
 
-    # Next, get the list of postcodes that are already covered by areas.
-    area_pcs = defaultdict(set)
+    # Next, get the list of authoritative postcodes comprising of postcodes that are already
+    # covered by areas and JSONL postcode import.
+    auth_pcs = defaultdict(set)
     with conn.cursor() as cur:
         cur.execute("""SELECT country_code, postcode
                        FROM location_postcodes WHERE osm_id is not null
+                            OR is_authoritative
                        ORDER BY country_code""")
         for cc, pc in cur:
-            area_pcs[cc].add(pc)
+            auth_pcs[cc].add(pc)
 
     # Create a temporary table which contains coverage of the postcode areas.
     with conn.cursor() as cur:
@@ -323,7 +428,12 @@ def _update_guessed_postcode(conn: Connection, analyzer: AbstractAnalyzer,
         cur.execute("""CREATE TABLE _global_postcode_area AS
                        (SELECT ST_SubDivide(ST_SimplifyPreserveTopology(
                                               ST_Union(geometry), 0.00001), 128) as geometry
-                        FROM place_postcode WHERE geometry is not null)
+                        FROM (
+                          SELECT geometry FROM place_postcode WHERE geometry is not null
+                          UNION
+                          SELECT geometry FROM location_postcodes
+                            WHERE is_authoritative
+                        ) x)
                     """)
         cur.execute("CREATE INDEX ON _global_postcode_area USING gist(geometry)")
 
@@ -351,7 +461,7 @@ def _update_guessed_postcode(conn: Connection, analyzer: AbstractAnalyzer,
                     collector.commit(conn, analyzer, project_dir, is_initial)
                 collector = _PostcodeCollector(country, matcher.get_matcher(country),
                                                matcher.get_postcode_extent(country),
-                                               exclude=area_pcs[country])
+                                               exclude=auth_pcs[country])
                 todo_countries.discard(country)
             collector.add(postcode, x, y)
 
@@ -363,7 +473,7 @@ def _update_guessed_postcode(conn: Connection, analyzer: AbstractAnalyzer,
         fmt = matcher.get_matcher(country)
         ext = matcher.get_postcode_extent(country)
         _PostcodeCollector(country, fmt, ext,
-                           exclude=area_pcs[country]).commit(conn, analyzer, project_dir, False)
+                           exclude=auth_pcs[country]).commit(conn, analyzer, project_dir, False)
 
     conn.execute("DROP TABLE IF EXISTS _global_postcode_area")
 
