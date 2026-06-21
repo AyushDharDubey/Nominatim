@@ -21,7 +21,14 @@ class APIRunner:
         self.exec_engine = create_func(environ)
 
     def run(self, endpoint, params, http_headers):
-        return asyncio.run(self.exec_engine(endpoint, params, http_headers))
+        from nominatim_db.utils.asyncio_utils import get_loop_factory
+
+        loop_factory = get_loop_factory()
+        if loop_factory is not None:
+            return asyncio.run(self.exec_engine(endpoint, params, http_headers),
+                               loop_factory=loop_factory)  # type: ignore[call-arg]
+        else:
+            return asyncio.run(self.exec_engine(endpoint, params, http_headers))
 
     def run_step(self, endpoint, base_params, datatable, fmt, http_headers):
         if fmt:

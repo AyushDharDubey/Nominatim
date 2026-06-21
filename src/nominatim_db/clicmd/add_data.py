@@ -66,7 +66,13 @@ class UpdateAddData:
         from ..tools import add_osm_data
 
         if args.tiger_data:
-            return asyncio.run(self._add_tiger_data(args))
+            from ..utils.asyncio_utils import get_loop_factory
+            loop_factory = get_loop_factory()
+            if loop_factory is not None:
+                return asyncio.run(self._add_tiger_data(args),
+                                   loop_factory=loop_factory)  # type: ignore[call-arg]
+            else:
+                return asyncio.run(self._add_tiger_data(args))
 
         with connect(args.config.get_libpq_dsn()) as conn:
             if is_frozen(conn):

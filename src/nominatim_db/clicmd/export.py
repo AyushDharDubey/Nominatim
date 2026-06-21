@@ -82,7 +82,13 @@ class QueryExport:
                            help='Export only children of this OSM relation')
 
     def run(self, args: NominatimArgs) -> int:
-        return asyncio.run(export(args))
+        from ..utils.asyncio_utils import get_loop_factory
+
+        loop_factory = get_loop_factory()
+        if loop_factory is not None:
+            return asyncio.run(export(args), loop_factory=loop_factory)  # type: ignore[call-arg]
+        else:
+            return asyncio.run(export(args))
 
 
 async def export(args: NominatimArgs) -> int:

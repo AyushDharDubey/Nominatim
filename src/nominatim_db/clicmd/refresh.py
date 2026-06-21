@@ -103,7 +103,15 @@ class UpdateRefresh:
                                            args.project_dir, tokenizer,
                                            force_reimport=args.postcode_force_reimport)
                 indexer = Indexer(args.config, tokenizer, args.threads or 1)
-                asyncio.run(indexer.index_postcodes())
+
+                from ..utils.asyncio_utils import get_loop_factory
+
+                loop_factory = get_loop_factory()
+                if loop_factory is not None:
+                    asyncio.run(indexer.index_postcodes(),
+                                loop_factory=loop_factory)  # type: ignore[call-arg]
+                else:
+                    asyncio.run(indexer.index_postcodes())
             else:
                 LOG.error("The place table doesn't exist. "
                           "Postcode updates on a frozen database is not possible.")

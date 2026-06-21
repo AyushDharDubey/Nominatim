@@ -185,5 +185,11 @@ class UpdateReplication:
         if args.check_for_updates:
             return self._check_for_updates(args)
 
-        asyncio.run(self._update(args))
+        from ..utils.asyncio_utils import get_loop_factory
+
+        loop_factory = get_loop_factory()
+        if loop_factory is not None:
+            asyncio.run(self._update(args), loop_factory=loop_factory)  # type: ignore[call-arg]
+        else:
+            asyncio.run(self._update(args))
         return 0

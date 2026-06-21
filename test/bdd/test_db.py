@@ -29,6 +29,7 @@ from nominatim_db import cli
 from nominatim_db.tools.database_import import load_data, create_table_triggers
 from nominatim_db.tools.postcodes import update_postcodes
 from nominatim_db.tokenizer import factory as tokenizer_factory
+from nominatim_db.utils.asyncio_utils import get_loop_factory
 
 
 def _rewrite_placeid_field(field, new_field, datatable, place_ids):
@@ -233,7 +234,14 @@ def do_import(db_conn, def_config):
     """ Run a reduced version of the Nominatim import.
     """
     create_table_triggers(db_conn, def_config)
-    asyncio.run(load_data(def_config.get_libpq_dsn(), 1))
+
+    loop_factory = get_loop_factory()
+    if loop_factory is not None:
+        asyncio.run(load_data(def_config.get_libpq_dsn(), 1),
+                    loop_factory=loop_factory)  # type: ignore[call-arg]
+    else:
+        asyncio.run(load_data(def_config.get_libpq_dsn(), 1))
+
     tokenizer = tokenizer_factory.get_tokenizer_for_db(def_config)
     update_postcodes(def_config.get_libpq_dsn(), None, tokenizer)
     cli.nominatim(['index', '-q'], def_config.environ)

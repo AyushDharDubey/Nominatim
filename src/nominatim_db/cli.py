@@ -158,7 +158,13 @@ class AdminServe:
                            help='Webserver framework to run. (default: falcon)')
 
     def run(self, args: NominatimArgs) -> int:
-        asyncio.run(self.run_uvicorn(args))
+        from .utils.asyncio_utils import get_loop_factory
+
+        loop_factory = get_loop_factory()
+        if loop_factory is not None:
+            asyncio.run(self.run_uvicorn(args), loop_factory=loop_factory)  # type: ignore[call-arg]
+        else:
+            asyncio.run(self.run_uvicorn(args))
 
         return 0
 

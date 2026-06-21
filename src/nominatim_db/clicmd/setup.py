@@ -80,7 +80,14 @@ class SetupAll:
                 "Cannot use --continue and --prepare-database together."
             )
 
-        return asyncio.run(self.async_run(args))
+        from ..utils.asyncio_utils import get_loop_factory
+
+        loop_factory = get_loop_factory()
+        if loop_factory is not None:
+            return asyncio.run(self.async_run(args),
+                               loop_factory=loop_factory)  # type: ignore[call-arg]
+        else:
+            return asyncio.run(self.async_run(args))
 
     async def async_run(self, args: NominatimArgs) -> int:
         from ..data import country_info

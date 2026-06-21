@@ -10,7 +10,9 @@ import asyncio
 from pathlib import Path
 
 if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # pytest-asyncio hook for event loop factory.
+    def pytest_asyncio_loop_factories(config, item):
+        return {"selector": asyncio.SelectorEventLoop}
 
 import psycopg
 from psycopg import sql as pysql

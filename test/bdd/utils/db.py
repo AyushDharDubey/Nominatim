@@ -17,6 +17,7 @@ from nominatim_db.data.country_info import setup_country_tables, create_country_
 from nominatim_db.tools.refresh import create_functions, load_address_levels_from_config
 from nominatim_db.tools.exec_utils import run_osm2pgsql
 from nominatim_db.tokenizer import factory as tokenizer_factory
+from nominatim_db.utils.asyncio_utils import get_loop_factory
 
 
 class DBManager:
@@ -96,7 +97,13 @@ class DBManager:
             load_address_levels_from_config(conn, config)
             create_partition_tables(conn, config)
             create_functions(conn, config, enable_diff_updates=False)
-            asyncio.run(create_search_indices(conn, config))
+
+            loop_factory = get_loop_factory()
+            if loop_factory is not None:
+                asyncio.run(create_search_indices(conn, config),
+                            loop_factory=loop_factory)  # type: ignore[call-arg]
+            else:
+                asyncio.run(create_search_indices(conn, config))
 
             tokenizer = tokenizer_factory.create_tokenizer(config)
             create_country_names(conn, tokenizer, config)
